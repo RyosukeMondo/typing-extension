@@ -9,6 +9,10 @@ A Chrome extension for practicing and improving your typing skills, built with R
 - Calculate typing speed (WPM) and accuracy
 - Track your progress with statistics
 - Clean, responsive UI
+- Support for n-typing-english.com website with toggle controls for:
+  - Japanese meaning visibility
+  - English text visibility
+  - Sound playback
 
 ## Tech Stack
 
@@ -59,6 +63,12 @@ A Chrome extension for practicing and improving your typing skills, built with R
 3. Type the displayed text as quickly and accurately as possible
 4. View your results when finished
 5. Click "View Statistics" to see your progress over time
+
+### Using with n-typing-english.com
+
+1. Visit [n-typing-english.com](https://n-typing-english.com/)
+2. The extension will automatically add toggle controls to the page
+3. Use the controls to show/hide Japanese meanings, English text, or enable/disable sound
 
 ## License
 

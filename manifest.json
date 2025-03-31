@@ -11,5 +11,19 @@
       "128": "src/assets/icon128.png"
     }
   },
-  "permissions": ["storage"]
+  "options_page": "options.html",
+  "content_scripts": [
+    {
+      "matches": ["*://n-typing-english.com/*"],
+      "js": ["src/contentScript.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["src/assets/*"],
+      "matches": ["*://n-typing-english.com/*"]
+    }
+  ],
+  "permissions": ["storage", "activeTab"]
 }
