@@ -1,0 +1,60 @@
+name: Build and Release Extension
+
+on:
+  push:
+    branches: [ main ]
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      
+      - name: Install dependencies
+        run: npm ci
+      
+      - name: Build extension
+        run: npm run build
+      
+      - name: Zip dist directory
+        run: |
+          cd dist
+          zip -r ../typing-extension.zip .
+      
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: typing-extension
+          path: typing-extension.zip
+          retention-days: 7
+  
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: typing-extension
+      
+      - name: Create Release
+        id: create_release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: typing-extension.zip
+          draft: false
+          prerelease: false
+          generate_release_notes: true

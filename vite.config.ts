@@ -18,5 +18,8 @@ export default defineConfig({
         index: resolve(__dirname, 'index.html')
       }
     }
+  },
+  resolve: {
+    extensions: ['.js', '.jsx', '.ts', '.tsx', '.json']
   }
 })

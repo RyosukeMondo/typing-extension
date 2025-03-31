@@ -293,7 +293,25 @@ function startTypingSession(): void {
   const breadcrumbItem = document.querySelector('.breadcrumb-item.active');
   if (breadcrumbItem && breadcrumbItem.textContent) {
     sectionName = breadcrumbItem.textContent.trim();
-    console.log('Section name detected:', sectionName);
+    console.log('Section name detected from breadcrumb:', sectionName);
+  }
+  
+  // Try to get a more detailed section name from the c-table
+  try {
+    // Find the currently active course in the c-table
+    const activeCourseRow = document.querySelector('.tabCourseIndexBackground');
+    if (activeCourseRow) {
+      const courseIndex = activeCourseRow.textContent?.trim();
+      const courseName = activeCourseRow.parentElement?.querySelector('a')?.textContent?.trim();
+      
+      if (courseIndex && courseName) {
+        sectionName = `${courseIndex}:${courseName}`;
+        console.log('Enhanced section name detected from c-table:', sectionName);
+      }
+    }
+  } catch (error) {
+    console.log('Error detecting section name from c-table:', error);
+    // Fall back to breadcrumb name if there's an error
   }
   
   // Create a new session
@@ -402,6 +420,12 @@ function handleResultSave(): void {
   const mistakes = parseInt(missElement.textContent || '0', 10);
   
   console.log('Parsed results:', { score, time, totalKeystrokes, mistakes });
+  console.log('Raw element contents:', {
+    scoreRaw: scoreElement.textContent,
+    timeRaw: timeElement.textContent,
+    totalRaw: totalElement.textContent,
+    missRaw: missElement.textContent
+  });
   
   // Update current session
   currentSession.endTime = new Date().toISOString();
