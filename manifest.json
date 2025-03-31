@@ -25,5 +25,6 @@
       "matches": ["*://n-typing-english.com/*"]
     }
   ],
-  "permissions": ["storage", "activeTab"]
+  "permissions": ["storage", "activeTab"],
+  "host_permissions": ["*://api.emailjs.com/*"]
 }

@@ -148,31 +148,58 @@ function loadVisibilitySettings(): void {
     showMap: true
   };
 
-  chrome.storage.sync.get(
-    defaultSettings,
-    (items: StorageItems) => {
-      // Update checkbox states
-      const japaneseToggle = document.getElementById('toggle-japanese') as HTMLInputElement | null;
-      const mapToggle = document.getElementById('toggle-map') as HTMLInputElement | null;
-      
-      if (japaneseToggle) {
-        japaneseToggle.checked = !!items.showJapanese;
+  try {
+    chrome.storage.sync.get(
+      defaultSettings,
+      (items: StorageItems) => {
+        try {
+          if (chrome.runtime.lastError) {
+            console.error('Error loading visibility settings:', chrome.runtime.lastError);
+            // Use default settings if there's an error
+            applyVisibilitySettings();
+            return;
+          }
+
+          // Update checkbox states
+          const japaneseToggle = document.getElementById('toggle-japanese') as HTMLInputElement | null;
+          const mapToggle = document.getElementById('toggle-map') as HTMLInputElement | null;
+          
+          if (japaneseToggle) {
+            japaneseToggle.checked = !!items.showJapanese;
+          }
+          
+          if (mapToggle) {
+            mapToggle.checked = !!items.showMap;
+          }
+          
+          // Apply settings
+          applyVisibilitySettings();
+        } catch (error) {
+          console.error('Error processing visibility settings:', error);
+          // Apply default settings on error
+          applyVisibilitySettings();
+        }
       }
-      
-      if (mapToggle) {
-        mapToggle.checked = !!items.showMap;
-      }
-      
-      // Apply settings
-      applyVisibilitySettings();
-    }
-  );
+    );
+  } catch (error) {
+    console.error('Error accessing chrome storage for visibility settings:', error);
+    // Apply default settings on error
+    applyVisibilitySettings();
+  }
 }
 
 function saveVisibilitySetting(key: string, value: boolean): void {
-  const setting: Record<string, boolean> = {};
-  setting[key] = value;
-  chrome.storage.sync.set(setting);
+  try {
+    const setting: Record<string, boolean> = {};
+    setting[key] = value;
+    chrome.storage.sync.set(setting, () => {
+      if (chrome.runtime.lastError) {
+        console.error(`Error saving ${key} setting:`, chrome.runtime.lastError);
+      }
+    });
+  } catch (error) {
+    console.error(`Error saving ${key} setting:`, error);
+  }
 }
 
 function applyVisibilitySettings(): void {
@@ -394,16 +421,37 @@ function generateSessionId(): string {
 }
 
 function saveSessionToStorage(session: TypingSession): void {
-  // Get existing sessions
-  chrome.storage.local.get({ typingSessions: [] }, (data) => {
-    const sessions = data.typingSessions || [];
-    sessions.push(session);
-    
-    // Save updated sessions
-    chrome.storage.local.set({ typingSessions: sessions }, () => {
-      console.log('Session saved to storage');
+  try {
+    // Get existing sessions
+    chrome.storage.local.get({ typingSessions: [] }, (data) => {
+      try {
+        const sessions = data.typingSessions || [];
+        sessions.push(session);
+        
+        // Save updated sessions
+        chrome.storage.local.set({ typingSessions: sessions }, () => {
+          if (chrome.runtime.lastError) {
+            console.error('Error saving session:', chrome.runtime.lastError);
+            return;
+          }
+          console.log('Session saved to storage');
+        });
+      } catch (error) {
+        console.error('Error processing storage data:', error);
+      }
     });
-  });
+  } catch (error) {
+    console.error('Error accessing chrome storage:', error);
+    // If we can't save to Chrome storage, try to save to sessionStorage as a fallback
+    try {
+      const sessions = JSON.parse(sessionStorage.getItem('typingSessions') || '[]');
+      sessions.push(session);
+      sessionStorage.setItem('typingSessions', JSON.stringify(sessions));
+      console.log('Session saved to sessionStorage as fallback');
+    } catch (sessionError) {
+      console.error('Failed to save to sessionStorage:', sessionError);
+    }
+  }
 }
 
 function updateSessionStatusUI(status: string): void {

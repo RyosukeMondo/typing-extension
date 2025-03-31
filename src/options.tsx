@@ -1,6 +1,10 @@
+/// <reference types="chrome" />
 import React, { useEffect, useState } from 'react';
 import ReactDOM from 'react-dom/client';
 import './index.css';
+import EmailJS from 'emailjs-com';
+
+// Chrome types are declared globally, no need to import
 
 // Define interfaces for typing session data
 interface TypingSessionSettings {
@@ -15,6 +19,7 @@ interface TypingSessionResult {
   time: number;
   totalKeystrokes: number;
   mistakes: number;
+  keystrokes: number;
 }
 
 interface TypingSession {
@@ -35,6 +40,15 @@ interface SessionStats {
   avgAccuracy: string;
 }
 
+// Email settings interface
+interface EmailSettings {
+  emailFrom: string;
+  emailTo: string;
+  emailjsPublicKey: string;
+  emailjsServiceId: string;
+  emailjsTemplateId: string;
+}
+
 function OptionsPage() {
   const [sessions, setSessions] = useState<TypingSession[]>([]);
   const [stats, setStats] = useState<SessionStats>({
@@ -43,9 +57,20 @@ function OptionsPage() {
     avgTime: '0',
     avgAccuracy: '0'
   });
+  const [emailSettings, setEmailSettings] = useState<EmailSettings>({
+    emailFrom: '',
+    emailTo: '',
+    emailjsPublicKey: '',
+    emailjsServiceId: '',
+    emailjsTemplateId: ''
+  });
+  const [showSettings, setShowSettings] = useState(false);
+  const [isSending, setIsSending] = useState(false);
+  const [statusMessage, setStatusMessage] = useState('');
 
   useEffect(() => {
     loadSessions();
+    loadEmailSettings();
   }, []);
 
   // Load sessions from storage
@@ -54,6 +79,31 @@ function OptionsPage() {
       const sessions: TypingSession[] = data.typingSessions || [];
       setSessions(sessions);
       updateStats(sessions);
+    });
+  };
+
+  // Load email settings from storage
+  const loadEmailSettings = () => {
+    chrome.storage.sync.get({
+      emailSettings: {
+        emailFrom: '',
+        emailTo: '',
+        emailjsPublicKey: '',
+        emailjsServiceId: '',
+        emailjsTemplateId: ''
+      }
+    }, (data) => {
+      setEmailSettings(data.emailSettings);
+    });
+  };
+
+  // Save email settings to storage
+  const saveEmailSettings = () => {
+    chrome.storage.sync.set({
+      emailSettings: emailSettings
+    }, () => {
+      setStatusMessage('Email settings saved successfully!');
+      setTimeout(() => setStatusMessage(''), 3000);
     });
   };
 
@@ -127,6 +177,279 @@ function OptionsPage() {
     return `${accuracy}%`;
   };
 
+  // Handle input change for email settings
+  const handleEmailSettingChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const { name, value } = e.target;
+    setEmailSettings(prev => ({
+      ...prev,
+      [name]: value
+    }));
+  };
+
+  // Send email with typing session summary
+  const sendSessionSummaryEmail = async () => {
+    // Validate email settings (Fail Fast principle)
+    if (!emailSettings.emailFrom || !emailSettings.emailTo) {
+      setStatusMessage('Please fill in both From and To email addresses');
+      setTimeout(() => setStatusMessage(''), 3000);
+      return;
+    }
+
+    // Validate EmailJS credentials
+    if (!emailSettings.emailjsPublicKey || !emailSettings.emailjsServiceId || !emailSettings.emailjsTemplateId) {
+      setStatusMessage('Please fill in all EmailJS credentials (Public Key, Service ID, and Template ID)');
+      setTimeout(() => setStatusMessage(''), 5000);
+      return;
+    }
+
+    // Validate sessions data
+    if (sessions.filter(s => s.result).length === 0) {
+      setStatusMessage('No completed typing sessions to send');
+      setTimeout(() => setStatusMessage(''), 3000);
+      return;
+    }
+
+    setIsSending(true);
+    setStatusMessage('Preparing to send email...');
+
+    try {
+      // Format the current date
+      const today = new Date();
+      const formattedDate = today.toLocaleDateString('en-US', {
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit'
+      });
+
+      // Create email body with session data
+      const emailBody = createEmailBody(sessions, stats);
+      
+      // Initialize EmailJS
+      console.log('Initializing EmailJS with public key:', emailSettings.emailjsPublicKey.substring(0, 4) + '...');
+      EmailJS.init(emailSettings.emailjsPublicKey);
+      
+      // Prepare email parameters for EmailJS
+      const templateParams = {
+        to_email: emailSettings.emailTo,
+        from_name: 'Typing Extension',
+        from_email: emailSettings.emailFrom,
+        subject: 'Typing Practice Summary',
+        message_html: emailBody,
+        total_sessions: stats.totalSessions.toString(),
+        avg_score: stats.avgScore,
+        avg_time: stats.avgTime,
+        avg_accuracy: stats.avgAccuracy,
+        session_details: createSessionDetailsHTML(sessions),
+        date: formattedDate
+      };
+      
+      console.log('Sending email with EmailJS', { 
+        service_id: emailSettings.emailjsServiceId,
+        template_id: emailSettings.emailjsTemplateId,
+        to: emailSettings.emailTo,
+        from: emailSettings.emailFrom,
+        bodyLength: emailBody.length
+      });
+      
+      // Send the email
+      const response = await EmailJS.send(
+        emailSettings.emailjsServiceId,
+        emailSettings.emailjsTemplateId,
+        templateParams
+      );
+      
+      console.log('Email sent successfully', response);
+      setStatusMessage('Email sent successfully! Clearing sessions...');
+      
+      // Clear sessions after successful email
+      chrome.storage.local.set({ typingSessions: [] }, () => {
+        loadSessions(); // Reload the empty list
+        setStatusMessage('Email sent and sessions cleared!');
+        setTimeout(() => setStatusMessage(''), 3000);
+      });
+    } catch (error) {
+      console.error('Error sending email:', error);
+      setStatusMessage(`Error sending email: ${error instanceof Error ? error.message : String(error)}`);
+      setTimeout(() => setStatusMessage(''), 5000);
+    } finally {
+      setIsSending(false);
+    }
+  };
+
+  // Create email body from session data
+  const createEmailBody = (sessions: TypingSession[], stats: SessionStats): string => {
+    const today = new Date();
+    const formattedDate = today.toLocaleDateString('en-US', {
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit'
+    });
+
+    // Format session details as HTML table
+    let sessionDetailsHtml = `
+      <table style="width: 100%; border-collapse: collapse; margin-bottom: 20px;">
+        <thead>
+          <tr style="background-color: #f2f2f2;">
+            <th style="padding: 10px; text-align: left; border-bottom: 2px solid #ddd;">Date</th>
+            <th style="padding: 10px; text-align: center; border-bottom: 2px solid #ddd;">Score</th>
+            <th style="padding: 10px; text-align: center; border-bottom: 2px solid #ddd;">Time (s)</th>
+            <th style="padding: 10px; text-align: center; border-bottom: 2px solid #ddd;">Keystrokes</th>
+            <th style="padding: 10px; text-align: center; border-bottom: 2px solid #ddd;">Mistakes</th>
+            <th style="padding: 10px; text-align: center; border-bottom: 2px solid #ddd;">Accuracy</th>
+          </tr>
+        </thead>
+        <tbody>
+    `;
+
+    // Add each session with result to the table
+    const completedSessions = sessions.filter(s => s.result);
+    completedSessions.forEach((session, index) => {
+      const rowStyle = index % 2 === 0 ? '' : 'background-color: #f9f9f9;';
+      const sessionDate = new Date(session.startTime);
+      const formattedSessionDate = sessionDate.toLocaleDateString('en-US', {
+        month: 'short',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit'
+      });
+      
+      // Since we filtered for sessions with result, we can safely assert it's not undefined
+      const result = session.result!;
+      
+      const accuracy = result.keystrokes > 0 
+        ? Math.round(((result.keystrokes - result.mistakes) / result.keystrokes) * 100) 
+        : 0;
+      
+      sessionDetailsHtml += `
+        <tr style="${rowStyle}">
+          <td style="padding: 8px; border-bottom: 1px solid #ddd;">${formattedSessionDate}</td>
+          <td style="padding: 8px; text-align: center; border-bottom: 1px solid #ddd;">${result.score}</td>
+          <td style="padding: 8px; text-align: center; border-bottom: 1px solid #ddd;">${result.time}</td>
+          <td style="padding: 8px; text-align: center; border-bottom: 1px solid #ddd;">${result.keystrokes}</td>
+          <td style="padding: 8px; text-align: center; border-bottom: 1px solid #ddd;">${result.mistakes}</td>
+          <td style="padding: 8px; text-align: center; border-bottom: 1px solid #ddd;">${accuracy}%</td>
+        </tr>
+      `;
+    });
+
+    sessionDetailsHtml += `
+        </tbody>
+      </table>
+    `;
+
+    // Create template parameters
+    const templateParams = {
+      total_sessions: stats.totalSessions.toString(),
+      avg_score: stats.avgScore,
+      avg_time: stats.avgTime,
+      avg_accuracy: stats.avgAccuracy,
+      session_details: sessionDetailsHtml,
+      date: formattedDate
+    };
+
+    // Replace template variables
+    let emailBody = `
+      <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+        <div style="background-color: #f8f9fa; padding: 20px; border-radius: 5px; margin-bottom: 20px;">
+          <h1 style="color: #2c3e50; margin-top: 0; text-align: center;">Typing Practice Summary</h1>
+        </div>
+
+        <div style="margin-bottom: 30px;">
+          <h2 style="color: #3498db; border-bottom: 1px solid #eee; padding-bottom: 10px;">Overall Statistics</h2>
+          <table style="width: 100%; border-collapse: collapse;">
+            <tr>
+              <td style="padding: 8px; border-bottom: 1px solid #eee; font-weight: bold;">Total Sessions:</td>
+              <td style="padding: 8px; border-bottom: 1px solid #eee;">${stats.totalSessions}</td>
+            </tr>
+            <tr>
+              <td style="padding: 8px; border-bottom: 1px solid #eee; font-weight: bold;">Average Score:</td>
+              <td style="padding: 8px; border-bottom: 1px solid #eee;">${stats.avgScore}</td>
+            </tr>
+            <tr>
+              <td style="padding: 8px; border-bottom: 1px solid #eee; font-weight: bold;">Average Time:</td>
+              <td style="padding: 8px; border-bottom: 1px solid #eee;">${stats.avgTime} seconds</td>
+            </tr>
+            <tr>
+              <td style="padding: 8px; border-bottom: 1px solid #eee; font-weight: bold;">Average Accuracy:</td>
+              <td style="padding: 8px; border-bottom: 1px solid #eee;">${stats.avgAccuracy}%</td>
+            </tr>
+          </table>
+        </div>
+
+        <div>
+          <h2 style="color: #3498db; border-bottom: 1px solid #eee; padding-bottom: 10px;">Session Details</h2>
+          ${sessionDetailsHtml}
+        </div>
+
+        <div style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #eee; font-size: 12px; color: #777; text-align: center;">
+          <p>This email was sent from the Typing Extension Chrome extension.</p>
+          <p>Date: ${formattedDate}</p>
+        </div>
+      </div>
+    `;
+
+    return emailBody;
+  };
+
+  // Create session details HTML
+  const createSessionDetailsHTML = (sessions: TypingSession[]): string => {
+    const completedSessions = sessions.filter(s => s.result);
+    let sessionDetailsHtml = `
+      <table style="width: 100%; border-collapse: collapse; margin-bottom: 20px;">
+        <thead>
+          <tr style="background-color: #f2f2f2;">
+            <th style="padding: 10px; text-align: left; border-bottom: 2px solid #ddd;">Date</th>
+            <th style="padding: 10px; text-align: center; border-bottom: 2px solid #ddd;">Score</th>
+            <th style="padding: 10px; text-align: center; border-bottom: 2px solid #ddd;">Time (s)</th>
+            <th style="padding: 10px; text-align: center; border-bottom: 2px solid #ddd;">Keystrokes</th>
+            <th style="padding: 10px; text-align: center; border-bottom: 2px solid #ddd;">Mistakes</th>
+            <th style="padding: 10px; text-align: center; border-bottom: 2px solid #ddd;">Accuracy</th>
+          </tr>
+        </thead>
+        <tbody>
+    `;
+
+    completedSessions.forEach((session, index) => {
+      const rowStyle = index % 2 === 0 ? '' : 'background-color: #f9f9f9;';
+      const sessionDate = new Date(session.startTime);
+      const formattedSessionDate = sessionDate.toLocaleDateString('en-US', {
+        month: 'short',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit'
+      });
+      
+      // Since we filtered for sessions with result, we can safely assert it's not undefined
+      const result = session.result!;
+      
+      const accuracy = result.keystrokes > 0 
+        ? Math.round(((result.keystrokes - result.mistakes) / result.keystrokes) * 100) 
+        : 0;
+      
+      sessionDetailsHtml += `
+        <tr style="${rowStyle}">
+          <td style="padding: 8px; border-bottom: 1px solid #ddd;">${formattedSessionDate}</td>
+          <td style="padding: 8px; text-align: center; border-bottom: 1px solid #ddd;">${result.score}</td>
+          <td style="padding: 8px; text-align: center; border-bottom: 1px solid #ddd;">${result.time}</td>
+          <td style="padding: 8px; text-align: center; border-bottom: 1px solid #ddd;">${result.keystrokes}</td>
+          <td style="padding: 8px; text-align: center; border-bottom: 1px solid #ddd;">${result.mistakes}</td>
+          <td style="padding: 8px; text-align: center; border-bottom: 1px solid #ddd;">${accuracy}%</td>
+        </tr>
+      `;
+    });
+
+    sessionDetailsHtml += `
+        </tbody>
+      </table>
+    `;
+
+    return sessionDetailsHtml;
+  };
+
   // Sort sessions by date (newest first)
   const sortedSessions = [...sessions]
     .filter(session => session.result) // Only show completed sessions
@@ -146,12 +469,120 @@ function OptionsPage() {
           </button>
           <button 
             onClick={clearAllSessions}
-            className="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600"
+            className="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600 mr-2"
           >
             Clear All Sessions
           </button>
+          <button 
+            onClick={() => setShowSettings(!showSettings)}
+            className="bg-gray-500 text-white px-4 py-2 rounded hover:bg-gray-600"
+          >
+            {showSettings ? 'Hide Email Settings' : 'Show Email Settings'}
+          </button>
+        </div>
+        <div>
+          <button 
+            onClick={sendSessionSummaryEmail}
+            disabled={isSending || sessions.filter(s => s.result).length === 0}
+            className={`bg-green-500 text-white px-4 py-2 rounded hover:bg-green-600 ${
+              (isSending || sessions.filter(s => s.result).length === 0) ? 'opacity-50 cursor-not-allowed' : ''
+            }`}
+          >
+            {isSending ? 'Sending...' : 'Send Email Summary'}
+          </button>
         </div>
       </div>
+
+      {statusMessage && (
+        <div className={`p-3 mb-4 rounded ${statusMessage.includes('Error') ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'}`}>
+          {statusMessage}
+        </div>
+      )}
+      
+      {showSettings && (
+        <div className="bg-white p-4 rounded shadow mb-6">
+          <h2 className="text-xl font-bold mb-4">Email Settings</h2>
+          <div className="mb-4 p-3 bg-blue-50 text-blue-700 rounded">
+            <p className="mb-2"><strong>EmailJS Setup Instructions:</strong></p>
+            <ol className="list-decimal pl-5 mb-2">
+              <li>Create a free account at <a href="https://www.emailjs.com/" target="_blank" rel="noopener noreferrer" className="text-blue-600 underline">EmailJS.com</a></li>
+              <li>Create an Email Service (Gmail, Outlook, etc.)</li>
+              <li>Create an Email Template with the variables shown below</li>
+              <li>Copy the HTML from <code>emailJS_template/template.html</code> in this project</li>
+              <li>Enter your EmailJS credentials below</li>
+            </ol>
+            <p className="mt-2 text-sm">Template variables: <code>from_name, from_email, to_email, subject, message_html, total_sessions, avg_score, avg_time, avg_accuracy, session_details, date</code></p>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <label className="block text-gray-700 mb-1">From Email</label>
+              <input 
+                type="email" 
+                name="emailFrom" 
+                value={emailSettings.emailFrom} 
+                onChange={handleEmailSettingChange}
+                placeholder="your.email@gmail.com"
+                className="w-full p-2 border rounded"
+              />
+            </div>
+            <div>
+              <label className="block text-gray-700 mb-1">To Email</label>
+              <input 
+                type="email" 
+                name="emailTo" 
+                value={emailSettings.emailTo} 
+                onChange={handleEmailSettingChange}
+                placeholder="parent.email@gmail.com"
+                className="w-full p-2 border rounded"
+              />
+            </div>
+            <div>
+              <label className="block text-gray-700 mb-1">EmailJS Public Key</label>
+              <input 
+                type="text" 
+                name="emailjsPublicKey" 
+                value={emailSettings.emailjsPublicKey} 
+                onChange={handleEmailSettingChange}
+                placeholder="your_emailjs_public_key"
+                className="w-full p-2 border rounded"
+              />
+              <p className="text-xs text-gray-500 mt-1">Find this in your EmailJS Dashboard under Account → API Keys</p>
+            </div>
+            <div>
+              <label className="block text-gray-700 mb-1">EmailJS Service ID</label>
+              <input 
+                type="text" 
+                name="emailjsServiceId" 
+                value={emailSettings.emailjsServiceId} 
+                onChange={handleEmailSettingChange}
+                placeholder="your_emailjs_service_id"
+                className="w-full p-2 border rounded"
+              />
+              <p className="text-xs text-gray-500 mt-1">Find this in your EmailJS Dashboard under Email Services</p>
+            </div>
+            <div>
+              <label className="block text-gray-700 mb-1">EmailJS Template ID</label>
+              <input 
+                type="text" 
+                name="emailjsTemplateId" 
+                value={emailSettings.emailjsTemplateId} 
+                onChange={handleEmailSettingChange}
+                placeholder="your_emailjs_template_id"
+                className="w-full p-2 border rounded"
+              />
+              <p className="text-xs text-gray-500 mt-1">Find this in your EmailJS Dashboard under Email Templates</p>
+            </div>
+          </div>
+          <div className="mt-4">
+            <button 
+              onClick={saveEmailSettings}
+              className="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600"
+            >
+              Save Email Settings
+            </button>
+          </div>
+        </div>
+      )}
       
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
         <div className="bg-white p-4 rounded shadow">
