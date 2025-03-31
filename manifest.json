@@ -26,5 +26,5 @@
     }
   ],
   "permissions": ["storage", "activeTab"],
-  "host_permissions": ["*://api.emailjs.com/*"]
+  "host_permissions": []
 }

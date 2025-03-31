@@ -1,10 +1,7 @@
 /// <reference types="chrome" />
-import React, { useEffect, useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import ReactDOM from 'react-dom/client';
-import './index.css';
-import EmailJS from 'emailjs-com';
-
-// Chrome types are declared globally, no need to import
+import html2canvas from 'html2canvas';
 
 // Define interfaces for typing session data
 interface TypingSessionSettings {
@@ -40,13 +37,26 @@ interface SessionStats {
   avgAccuracy: string;
 }
 
-// Email settings interface
-interface EmailSettings {
-  emailFrom: string;
-  emailTo: string;
-  emailjsPublicKey: string;
-  emailjsServiceId: string;
-  emailjsTemplateId: string;
+// Section data for reports
+interface SectionData {
+  name: string;
+  count: number;
+  totalTime: number;
+  settings: {
+    japanese: number;
+    map: number;
+    sound: number;
+    spell: number;
+  };
+}
+
+// Report data interface
+interface ReportData {
+  studentName: string;
+  date: string;
+  stats: SessionStats;
+  sections: SectionData[];
+  securityToken: string;
 }
 
 function OptionsPage() {
@@ -57,21 +67,23 @@ function OptionsPage() {
     avgTime: '0',
     avgAccuracy: '0'
   });
-  const [emailSettings, setEmailSettings] = useState<EmailSettings>({
-    emailFrom: '',
-    emailTo: '',
-    emailjsPublicKey: '',
-    emailjsServiceId: '',
-    emailjsTemplateId: ''
-  });
-  const [showSettings, setShowSettings] = useState(false);
-  const [isSending, setIsSending] = useState(false);
-  const [statusMessage, setStatusMessage] = useState('');
+  const [activeTab, setActiveTab] = useState('history');
+  const [reportData, setReportData] = useState<ReportData | null>(null);
+  const [studentName, setStudentName] = useState('Student');
+  const [reportPeriod, setReportPeriod] = useState('day');
+  const [statusMessage, setStatusMessage] = useState<{ text: string; type: 'success' | 'error' } | null>(null);
+  const [isGenerating, setIsGenerating] = useState(false);
+  const reportContentRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     loadSessions();
-    loadEmailSettings();
   }, []);
+
+  useEffect(() => {
+    if (sessions.length > 0) {
+      generateEmptyReportTemplate();
+    }
+  }, [sessions]);
 
   // Load sessions from storage
   const loadSessions = () => {
@@ -79,31 +91,6 @@ function OptionsPage() {
       const sessions: TypingSession[] = data.typingSessions || [];
       setSessions(sessions);
       updateStats(sessions);
-    });
-  };
-
-  // Load email settings from storage
-  const loadEmailSettings = () => {
-    chrome.storage.sync.get({
-      emailSettings: {
-        emailFrom: '',
-        emailTo: '',
-        emailjsPublicKey: '',
-        emailjsServiceId: '',
-        emailjsTemplateId: ''
-      }
-    }, (data) => {
-      setEmailSettings(data.emailSettings);
-    });
-  };
-
-  // Save email settings to storage
-  const saveEmailSettings = () => {
-    chrome.storage.sync.set({
-      emailSettings: emailSettings
-    }, () => {
-      setStatusMessage('Email settings saved successfully!');
-      setTimeout(() => setStatusMessage(''), 3000);
     });
   };
 
@@ -148,21 +135,10 @@ function OptionsPage() {
     if (window.confirm('Are you sure you want to delete all typing session history? This cannot be undone.')) {
       chrome.storage.local.set({ typingSessions: [] }, () => {
         loadSessions(); // Reload the empty list
-        alert('All sessions have been cleared.');
+        setReportData(null);
+        showStatusMessage('All sessions have been cleared.', 'success');
       });
     }
-  };
-
-  // Generate HTML for settings badges
-  const getSettingsBadges = (settings: TypingSessionSettings) => {
-    return (
-      <div className="badges-container">
-        {settings.japanese && <span className="badge badge-success">Japanese</span>}
-        {settings.map && <span className="badge badge-success">Map</span>}
-        {settings.sound && <span className="badge badge-success">Sound</span>}
-        {settings.spell && <span className="badge badge-success">Spell</span>}
-      </div>
-    );
   };
 
   // Calculate accuracy for a session
@@ -177,473 +153,690 @@ function OptionsPage() {
     return `${accuracy}%`;
   };
 
-  // Handle input change for email settings
-  const handleEmailSettingChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const { name, value } = e.target;
-    setEmailSettings(prev => ({
-      ...prev,
-      [name]: value
-    }));
+  // Show status message
+  const showStatusMessage = (message: string, type: 'success' | 'error') => {
+    setStatusMessage({ text: message, type });
+    const statusElement = document.getElementById('report-status');
+    if (statusElement) {
+      statusElement.className = `status-message ${type}`;
+      statusElement.style.display = 'block';
+      setTimeout(() => {
+        statusElement.style.display = 'none';
+        setStatusMessage(null);
+      }, 3000);
+    }
   };
 
-  // Send email with typing session summary
-  const sendSessionSummaryEmail = async () => {
-    // Validate email settings (Fail Fast principle)
-    if (!emailSettings.emailFrom || !emailSettings.emailTo) {
-      setStatusMessage('Please fill in both From and To email addresses');
-      setTimeout(() => setStatusMessage(''), 3000);
-      return;
-    }
+  // Generate a security token
+  const generateSecurityToken = () => {
+    return Math.random().toString(36).substring(2, 15) + 
+           Math.random().toString(36).substring(2, 15);
+  };
 
-    // Validate EmailJS credentials
-    if (!emailSettings.emailjsPublicKey || !emailSettings.emailjsServiceId || !emailSettings.emailjsTemplateId) {
-      setStatusMessage('Please fill in all EmailJS credentials (Public Key, Service ID, and Template ID)');
-      setTimeout(() => setStatusMessage(''), 5000);
-      return;
-    }
+  // Filter sessions based on selected period
+  const filterSessionsByPeriod = (sessions: TypingSession[], period: string) => {
+    const now = new Date();
+    const filteredSessions = sessions.filter(session => {
+      const sessionDate = new Date(session.startTime);
+      const diffTime = Math.abs(now.getTime() - sessionDate.getTime());
+      const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+      
+      switch (period) {
+        case 'day':
+          return diffDays <= 1;
+        case 'week':
+          return diffDays <= 7;
+        case 'month':
+          return diffDays <= 30;
+        case 'all':
+          return true;
+        default:
+          return true;
+      }
+    });
+    
+    return filteredSessions;
+  };
 
-    // Validate sessions data
-    if (sessions.filter(s => s.result).length === 0) {
-      setStatusMessage('No completed typing sessions to send');
-      setTimeout(() => setStatusMessage(''), 3000);
-      return;
-    }
+  // Generate report data
+  const generateSectionData = (sessions: TypingSession[]): SectionData[] => {
+    const sectionMap = new Map<string, SectionData>();
+    
+    sessions.forEach(session => {
+      if (!session.result) return;
+      
+      const sectionName = session.title || 'Unknown Section';
+      
+      if (!sectionMap.has(sectionName)) {
+        sectionMap.set(sectionName, {
+          name: sectionName,
+          count: 0,
+          totalTime: 0,
+          settings: {
+            japanese: 0,
+            map: 0,
+            sound: 0,
+            spell: 0
+          }
+        });
+      }
+      
+      const sectionData = sectionMap.get(sectionName)!;
+      sectionData.count += 1;
+      sectionData.totalTime += session.result.time;
+      
+      // Track settings usage
+      if (session.settings.japanese) sectionData.settings.japanese += 1;
+      if (session.settings.map) sectionData.settings.map += 1;
+      if (session.settings.sound) sectionData.settings.sound += 1;
+      if (session.settings.spell) sectionData.settings.spell += 1;
+    });
+    
+    return Array.from(sectionMap.values());
+  };
 
-    setIsSending(true);
-    setStatusMessage('Preparing to send email...');
-
+  // Generate report
+  const generateReport = () => {
+    setIsGenerating(true);
+    
     try {
-      // Format the current date
-      const today = new Date();
-      const formattedDate = today.toLocaleDateString('en-US', {
-        year: 'numeric',
-        month: 'long',
-        day: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit'
-      });
-
-      // Create email body with session data
-      const emailBody = createEmailBody(sessions, stats);
-      
-      // Initialize EmailJS
-      console.log('Initializing EmailJS with public key:', emailSettings.emailjsPublicKey.substring(0, 4) + '...');
-      EmailJS.init(emailSettings.emailjsPublicKey);
-      
-      // Prepare email parameters for EmailJS
-      const templateParams = {
-        to_email: emailSettings.emailTo,
-        from_name: 'Typing Extension',
-        from_email: emailSettings.emailFrom,
-        subject: 'Typing Practice Summary',
-        message_html: emailBody,
-        total_sessions: stats.totalSessions.toString(),
-        avg_score: stats.avgScore,
-        avg_time: stats.avgTime,
-        avg_accuracy: stats.avgAccuracy,
-        session_details: createSessionDetailsHTML(sessions),
-        date: formattedDate
-      };
-      
-      console.log('Sending email with EmailJS', { 
-        service_id: emailSettings.emailjsServiceId,
-        template_id: emailSettings.emailjsTemplateId,
-        to: emailSettings.emailTo,
-        from: emailSettings.emailFrom,
-        bodyLength: emailBody.length
-      });
-      
-      // Send the email
-      const response = await EmailJS.send(
-        emailSettings.emailjsServiceId,
-        emailSettings.emailjsTemplateId,
-        templateParams
+      // Filter sessions based on selected period
+      const filteredSessions = filterSessionsByPeriod(
+        sessions.filter(s => s.result), 
+        reportPeriod
       );
       
-      console.log('Email sent successfully', response);
-      setStatusMessage('Email sent successfully! Clearing sessions...');
+      if (filteredSessions.length === 0) {
+        showStatusMessage('No completed typing sessions found for the selected period.', 'error');
+        setIsGenerating(false);
+        return;
+      }
       
-      // Clear sessions after successful email
-      chrome.storage.local.set({ typingSessions: [] }, () => {
-        loadSessions(); // Reload the empty list
-        setStatusMessage('Email sent and sessions cleared!');
-        setTimeout(() => setStatusMessage(''), 3000);
-      });
+      // Generate section data
+      const sectionData = generateSectionData(filteredSessions);
+      
+      // Generate security token
+      const securityToken = generateSecurityToken();
+      
+      // Save token to storage
+      chrome.storage.local.set({ reportSecurityToken: securityToken });
+      
+      // Create report data
+      const report: ReportData = {
+        studentName: studentName,
+        date: new Date().toLocaleDateString('en-US', {
+          year: 'numeric',
+          month: 'long',
+          day: 'numeric'
+        }),
+        stats: {
+          totalSessions: filteredSessions.length,
+          avgScore: (filteredSessions.reduce((sum, s) => sum + (s.result?.score || 0), 0) / filteredSessions.length).toFixed(1),
+          avgTime: (filteredSessions.reduce((sum, s) => sum + (s.result?.time || 0), 0) / filteredSessions.length).toFixed(1),
+          avgAccuracy: calculateAverageAccuracy(filteredSessions)
+        },
+        sections: sectionData,
+        securityToken: securityToken
+      };
+      
+      setReportData(report);
+      
+      // Enable save button
+      const saveButton = document.getElementById('save-report') as HTMLButtonElement;
+      if (saveButton) {
+        saveButton.disabled = false;
+      }
+      
+      // Show success message
+      showStatusMessage('Report generated successfully!', 'success');
+      
+      // Render the report
+      setTimeout(() => {
+        renderReport(report);
+      }, 100);
     } catch (error) {
-      console.error('Error sending email:', error);
-      setStatusMessage(`Error sending email: ${error instanceof Error ? error.message : String(error)}`);
-      setTimeout(() => setStatusMessage(''), 5000);
+      console.error('Error generating report:', error);
+      showStatusMessage(`Error generating report: ${error instanceof Error ? error.message : String(error)}`, 'error');
     } finally {
-      setIsSending(false);
+      setIsGenerating(false);
     }
   };
 
-  // Create email body from session data
-  const createEmailBody = (sessions: TypingSession[], stats: SessionStats): string => {
-    const today = new Date();
-    const formattedDate = today.toLocaleDateString('en-US', {
-      year: 'numeric',
-      month: 'long',
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit'
+  // Calculate average accuracy
+  const calculateAverageAccuracy = (sessions: TypingSession[]): string => {
+    let totalKeystrokes = 0;
+    let totalMistakes = 0;
+    
+    sessions.forEach(session => {
+      if (session.result) {
+        totalKeystrokes += session.result.totalKeystrokes;
+        totalMistakes += session.result.mistakes;
+      }
     });
+    
+    if (totalKeystrokes === 0) return '0';
+    
+    return ((totalKeystrokes - totalMistakes) / totalKeystrokes * 100).toFixed(1);
+  };
 
-    // Format session details as HTML table
-    let sessionDetailsHtml = `
-      <table style="width: 100%; border-collapse: collapse; margin-bottom: 20px;">
-        <thead>
-          <tr style="background-color: #f2f2f2;">
-            <th style="padding: 10px; text-align: left; border-bottom: 2px solid #ddd;">Date</th>
-            <th style="padding: 10px; text-align: center; border-bottom: 2px solid #ddd;">Score</th>
-            <th style="padding: 10px; text-align: center; border-bottom: 2px solid #ddd;">Time (s)</th>
-            <th style="padding: 10px; text-align: center; border-bottom: 2px solid #ddd;">Keystrokes</th>
-            <th style="padding: 10px; text-align: center; border-bottom: 2px solid #ddd;">Mistakes</th>
-            <th style="padding: 10px; text-align: center; border-bottom: 2px solid #ddd;">Accuracy</th>
-          </tr>
-        </thead>
-        <tbody>
-    `;
-
-    // Add each session with result to the table
-    const completedSessions = sessions.filter(s => s.result);
-    completedSessions.forEach((session, index) => {
-      const rowStyle = index % 2 === 0 ? '' : 'background-color: #f9f9f9;';
-      const sessionDate = new Date(session.startTime);
-      const formattedSessionDate = sessionDate.toLocaleDateString('en-US', {
-        month: 'short',
-        day: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit'
-      });
+  // Render the report
+  const renderReport = (report: ReportData) => {
+    const reportContent = document.getElementById('report-content');
+    if (!reportContent) return;
+    
+    // Get max time for scaling
+    const maxTime = Math.max(...report.sections.map(s => s.totalTime));
+    
+    // Create report HTML
+    reportContent.innerHTML = `
+      <div className="report-header">
+        <h2>${report.studentName}'s Typing Report</h2>
+        <p>Generated on ${report.date}</p>
+      </div>
       
-      // Since we filtered for sessions with result, we can safely assert it's not undefined
-      const result = session.result!;
-      
-      const accuracy = result.keystrokes > 0 
-        ? Math.round(((result.keystrokes - result.mistakes) / result.keystrokes) * 100) 
-        : 0;
-      
-      sessionDetailsHtml += `
-        <tr style="${rowStyle}">
-          <td style="padding: 8px; border-bottom: 1px solid #ddd;">${formattedSessionDate}</td>
-          <td style="padding: 8px; text-align: center; border-bottom: 1px solid #ddd;">${result.score}</td>
-          <td style="padding: 8px; text-align: center; border-bottom: 1px solid #ddd;">${result.time}</td>
-          <td style="padding: 8px; text-align: center; border-bottom: 1px solid #ddd;">${result.keystrokes}</td>
-          <td style="padding: 8px; text-align: center; border-bottom: 1px solid #ddd;">${result.mistakes}</td>
-          <td style="padding: 8px; text-align: center; border-bottom: 1px solid #ddd;">${accuracy}%</td>
-        </tr>
-      `;
-    });
-
-    sessionDetailsHtml += `
-        </tbody>
-      </table>
-    `;
-
-    // Create template parameters
-    const templateParams = {
-      total_sessions: stats.totalSessions.toString(),
-      avg_score: stats.avgScore,
-      avg_time: stats.avgTime,
-      avg_accuracy: stats.avgAccuracy,
-      session_details: sessionDetailsHtml,
-      date: formattedDate
-    };
-
-    // Replace template variables
-    let emailBody = `
-      <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
-        <div style="background-color: #f8f9fa; padding: 20px; border-radius: 5px; margin-bottom: 20px;">
-          <h1 style="color: #2c3e50; margin-top: 0; text-align: center;">Typing Practice Summary</h1>
-        </div>
-
-        <div style="margin-bottom: 30px;">
-          <h2 style="color: #3498db; border-bottom: 1px solid #eee; padding-bottom: 10px;">Overall Statistics</h2>
-          <table style="width: 100%; border-collapse: collapse;">
-            <tr>
-              <td style="padding: 8px; border-bottom: 1px solid #eee; font-weight: bold;">Total Sessions:</td>
-              <td style="padding: 8px; border-bottom: 1px solid #eee;">${stats.totalSessions}</td>
-            </tr>
-            <tr>
-              <td style="padding: 8px; border-bottom: 1px solid #eee; font-weight: bold;">Average Score:</td>
-              <td style="padding: 8px; border-bottom: 1px solid #eee;">${stats.avgScore}</td>
-            </tr>
-            <tr>
-              <td style="padding: 8px; border-bottom: 1px solid #eee; font-weight: bold;">Average Time:</td>
-              <td style="padding: 8px; border-bottom: 1px solid #eee;">${stats.avgTime} seconds</td>
-            </tr>
-            <tr>
-              <td style="padding: 8px; border-bottom: 1px solid #eee; font-weight: bold;">Average Accuracy:</td>
-              <td style="padding: 8px; border-bottom: 1px solid #eee;">${stats.avgAccuracy}%</td>
-            </tr>
-          </table>
-        </div>
-
-        <div>
-          <h2 style="color: #3498db; border-bottom: 1px solid #eee; padding-bottom: 10px;">Session Details</h2>
-          ${sessionDetailsHtml}
-        </div>
-
-        <div style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #eee; font-size: 12px; color: #777; text-align: center;">
-          <p>This email was sent from the Typing Extension Chrome extension.</p>
-          <p>Date: ${formattedDate}</p>
+      <div className="report-section">
+        <h3>Overall Statistics</h3>
+        <div className="stats-container">
+          <div className="stat-item">
+            <span className="stat-label">Total Sessions</span>
+            <span className="stat-value">${report.stats.totalSessions}</span>
+          </div>
+          <div className="stat-item">
+            <span className="stat-label">Average Score</span>
+            <span className="stat-value">${report.stats.avgScore}</span>
+          </div>
+          <div className="stat-item">
+            <span className="stat-label">Average Time (sec)</span>
+            <span className="stat-value">${report.stats.avgTime}</span>
+          </div>
+          <div className="stat-item">
+            <span className="stat-label">Average Accuracy</span>
+            <span className="stat-value">${report.stats.avgAccuracy}%</span>
+          </div>
         </div>
       </div>
+      
+      <div className="report-section">
+        <h3>Activity by Section</h3>
+        <div className="section-chart">
+          ${report.sections.map(section => {
+            const widthPercent = maxTime > 0 ? (section.totalTime / maxTime * 100) : 0;
+            return `
+              <div className="section-bar" style="width: 0%" data-width="${widthPercent}%">
+                <span className="section-bar-label">${section.name}</span>
+                <span className="section-bar-value">${section.totalTime.toFixed(1)}s</span>
+              </div>
+              <div className="settings-indicator">
+                <span className="setting-badge ${section.settings.japanese > 0 ? 'active' : ''}">Japanese</span>
+                <span className="setting-badge ${section.settings.map > 0 ? 'active' : ''}">Map</span>
+                <span className="setting-badge ${section.settings.sound > 0 ? 'active' : ''}">Sound</span>
+                <span className="setting-badge ${section.settings.spell > 0 ? 'active' : ''}">Spell</span>
+                <span>Count: ${section.count}</span>
+              </div>
+            `;
+          }).join('')}
+        </div>
+      </div>
+      
+      <div className="report-footer">
+        <p>This report was generated by the Typing Extension for Chrome.</p>
+        <p>Security Token: ${report.securityToken.substring(0, 8)}...</p>
+      </div>
     `;
-
-    return emailBody;
-  };
-
-  // Create session details HTML
-  const createSessionDetailsHTML = (sessions: TypingSession[]): string => {
-    const completedSessions = sessions.filter(s => s.result);
-    let sessionDetailsHtml = `
-      <table style="width: 100%; border-collapse: collapse; margin-bottom: 20px;">
-        <thead>
-          <tr style="background-color: #f2f2f2;">
-            <th style="padding: 10px; text-align: left; border-bottom: 2px solid #ddd;">Date</th>
-            <th style="padding: 10px; text-align: center; border-bottom: 2px solid #ddd;">Score</th>
-            <th style="padding: 10px; text-align: center; border-bottom: 2px solid #ddd;">Time (s)</th>
-            <th style="padding: 10px; text-align: center; border-bottom: 2px solid #ddd;">Keystrokes</th>
-            <th style="padding: 10px; text-align: center; border-bottom: 2px solid #ddd;">Mistakes</th>
-            <th style="padding: 10px; text-align: center; border-bottom: 2px solid #ddd;">Accuracy</th>
-          </tr>
-        </thead>
-        <tbody>
-    `;
-
-    completedSessions.forEach((session, index) => {
-      const rowStyle = index % 2 === 0 ? '' : 'background-color: #f9f9f9;';
-      const sessionDate = new Date(session.startTime);
-      const formattedSessionDate = sessionDate.toLocaleDateString('en-US', {
-        month: 'short',
-        day: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit'
+    
+    // Animate bars
+    setTimeout(() => {
+      const bars = document.querySelectorAll('.section-bar');
+      bars.forEach(bar => {
+        const width = (bar as HTMLElement).dataset.width || '0%';
+        (bar as HTMLElement).style.width = width;
       });
-      
-      // Since we filtered for sessions with result, we can safely assert it's not undefined
-      const result = session.result!;
-      
-      const accuracy = result.keystrokes > 0 
-        ? Math.round(((result.keystrokes - result.mistakes) / result.keystrokes) * 100) 
-        : 0;
-      
-      sessionDetailsHtml += `
-        <tr style="${rowStyle}">
-          <td style="padding: 8px; border-bottom: 1px solid #ddd;">${formattedSessionDate}</td>
-          <td style="padding: 8px; text-align: center; border-bottom: 1px solid #ddd;">${result.score}</td>
-          <td style="padding: 8px; text-align: center; border-bottom: 1px solid #ddd;">${result.time}</td>
-          <td style="padding: 8px; text-align: center; border-bottom: 1px solid #ddd;">${result.keystrokes}</td>
-          <td style="padding: 8px; text-align: center; border-bottom: 1px solid #ddd;">${result.mistakes}</td>
-          <td style="padding: 8px; text-align: center; border-bottom: 1px solid #ddd;">${accuracy}%</td>
-        </tr>
-      `;
-    });
-
-    sessionDetailsHtml += `
-        </tbody>
-      </table>
-    `;
-
-    return sessionDetailsHtml;
+    }, 100);
   };
+
+  // Save report as PNG
+  async function saveReportAsPNG() {
+    if (!reportContentRef.current || !reportData) {
+      showStatusMessage('No report content to save', 'error');
+      return;
+    }
+
+    try {
+      // Use the locally installed html2canvas library
+      const canvas = await html2canvas(reportContentRef.current);
+      
+      // Convert canvas to blob
+      canvas.toBlob((blob) => {
+        if (!blob) {
+          showStatusMessage('Failed to create image', 'error');
+          return;
+        }
+        
+        // Create download link
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.download = `typing-report-${new Date().toISOString().split('T')[0]}.png`;
+        link.href = url;
+        link.click();
+        
+        // Clean up
+        URL.revokeObjectURL(url);
+        showStatusMessage('Report saved as PNG', 'success');
+      });
+    } catch (error: unknown) {
+      console.error('Error saving report as PNG:', error);
+      showStatusMessage(`Error saving report as PNG: ${error instanceof Error ? error.message : String(error)}`, 'error');
+    }
+  }
 
   // Sort sessions by date (newest first)
   const sortedSessions = [...sessions]
     .filter(session => session.result) // Only show completed sessions
     .sort((a, b) => new Date(b.startTime).getTime() - new Date(a.startTime).getTime());
 
+  // Generate an empty report template with placeholder data
+  const generateEmptyReportTemplate = () => {
+    const placeholderData: ReportData = {
+      studentName: studentName,
+      date: new Date().toLocaleDateString(),
+      stats: {
+        totalSessions: 0,
+        avgScore: '0',
+        avgTime: '0',
+        avgAccuracy: '0'
+      },
+      sections: [
+        { name: "Section 1", count: 0, totalTime: 0, settings: { japanese: 0, map: 0, sound: 0, spell: 0 } },
+        { name: "Section 2", count: 0, totalTime: 0, settings: { japanese: 0, map: 0, sound: 0, spell: 0 } },
+        { name: "Section 3", count: 0, totalTime: 0, settings: { japanese: 0, map: 0, sound: 0, spell: 0 } }
+      ],
+      securityToken: generateSecurityToken()
+    };
+    
+    setReportData(placeholderData);
+  };
+
   return (
     <div className="container mx-auto p-4 max-w-6xl">
-      <h1 className="text-2xl font-bold mb-4 pb-2 border-b">Typing Extension - Session History</h1>
-      
-      <div className="flex justify-between items-center mb-6">
-        <div>
-          <button 
-            onClick={loadSessions}
-            className="bg-blue-500 text-white px-4 py-2 rounded mr-2 hover:bg-blue-600"
-          >
-            Refresh Data
-          </button>
-          <button 
-            onClick={clearAllSessions}
-            className="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600 mr-2"
-          >
-            Clear All Sessions
-          </button>
-          <button 
-            onClick={() => setShowSettings(!showSettings)}
-            className="bg-gray-500 text-white px-4 py-2 rounded hover:bg-gray-600"
-          >
-            {showSettings ? 'Hide Email Settings' : 'Show Email Settings'}
-          </button>
+      <div className="bg-white rounded-lg shadow-lg overflow-hidden mb-8">
+        <div className="bg-gradient-to-r from-blue-500 to-blue-600 p-6">
+          <h1 className="text-3xl font-bold text-white">Typing Extension - Options</h1>
         </div>
-        <div>
-          <button 
-            onClick={sendSessionSummaryEmail}
-            disabled={isSending || sessions.filter(s => s.result).length === 0}
-            className={`bg-green-500 text-white px-4 py-2 rounded hover:bg-green-600 ${
-              (isSending || sessions.filter(s => s.result).length === 0) ? 'opacity-50 cursor-not-allowed' : ''
-            }`}
-          >
-            {isSending ? 'Sending...' : 'Send Email Summary'}
-          </button>
-        </div>
-      </div>
-
-      {statusMessage && (
-        <div className={`p-3 mb-4 rounded ${statusMessage.includes('Error') ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'}`}>
-          {statusMessage}
-        </div>
-      )}
-      
-      {showSettings && (
-        <div className="bg-white p-4 rounded shadow mb-6">
-          <h2 className="text-xl font-bold mb-4">Email Settings</h2>
-          <div className="mb-4 p-3 bg-blue-50 text-blue-700 rounded">
-            <p className="mb-2"><strong>EmailJS Setup Instructions:</strong></p>
-            <ol className="list-decimal pl-5 mb-2">
-              <li>Create a free account at <a href="https://www.emailjs.com/" target="_blank" rel="noopener noreferrer" className="text-blue-600 underline">EmailJS.com</a></li>
-              <li>Create an Email Service (Gmail, Outlook, etc.)</li>
-              <li>Create an Email Template with the variables shown below</li>
-              <li>Copy the HTML from <code>emailJS_template/template.html</code> in this project</li>
-              <li>Enter your EmailJS credentials below</li>
-            </ol>
-            <p className="mt-2 text-sm">Template variables: <code>from_name, from_email, to_email, subject, message_html, total_sessions, avg_score, avg_time, avg_accuracy, session_details, date</code></p>
-          </div>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div>
-              <label className="block text-gray-700 mb-1">From Email</label>
-              <input 
-                type="email" 
-                name="emailFrom" 
-                value={emailSettings.emailFrom} 
-                onChange={handleEmailSettingChange}
-                placeholder="your.email@gmail.com"
-                className="w-full p-2 border rounded"
-              />
-            </div>
-            <div>
-              <label className="block text-gray-700 mb-1">To Email</label>
-              <input 
-                type="email" 
-                name="emailTo" 
-                value={emailSettings.emailTo} 
-                onChange={handleEmailSettingChange}
-                placeholder="parent.email@gmail.com"
-                className="w-full p-2 border rounded"
-              />
-            </div>
-            <div>
-              <label className="block text-gray-700 mb-1">EmailJS Public Key</label>
-              <input 
-                type="text" 
-                name="emailjsPublicKey" 
-                value={emailSettings.emailjsPublicKey} 
-                onChange={handleEmailSettingChange}
-                placeholder="your_emailjs_public_key"
-                className="w-full p-2 border rounded"
-              />
-              <p className="text-xs text-gray-500 mt-1">Find this in your EmailJS Dashboard under Account → API Keys</p>
-            </div>
-            <div>
-              <label className="block text-gray-700 mb-1">EmailJS Service ID</label>
-              <input 
-                type="text" 
-                name="emailjsServiceId" 
-                value={emailSettings.emailjsServiceId} 
-                onChange={handleEmailSettingChange}
-                placeholder="your_emailjs_service_id"
-                className="w-full p-2 border rounded"
-              />
-              <p className="text-xs text-gray-500 mt-1">Find this in your EmailJS Dashboard under Email Services</p>
-            </div>
-            <div>
-              <label className="block text-gray-700 mb-1">EmailJS Template ID</label>
-              <input 
-                type="text" 
-                name="emailjsTemplateId" 
-                value={emailSettings.emailjsTemplateId} 
-                onChange={handleEmailSettingChange}
-                placeholder="your_emailjs_template_id"
-                className="w-full p-2 border rounded"
-              />
-              <p className="text-xs text-gray-500 mt-1">Find this in your EmailJS Dashboard under Email Templates</p>
-            </div>
-          </div>
-          <div className="mt-4">
-            <button 
-              onClick={saveEmailSettings}
-              className="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600"
+        
+        <div className="border-b border-gray-200">
+          <nav className="flex -mb-px">
+            <button
+              className={`py-4 px-6 font-medium text-sm focus:outline-none ${
+                activeTab === 'history'
+                  ? 'border-b-2 border-blue-500 text-blue-600'
+                  : 'text-gray-500 hover:text-gray-700 hover:border-gray-300'
+              }`}
+              onClick={() => setActiveTab('history')}
             >
-              Save Email Settings
+              Session History
             </button>
+            <button
+              className={`py-4 px-6 font-medium text-sm focus:outline-none ${
+                activeTab === 'report'
+                  ? 'border-b-2 border-blue-500 text-blue-600'
+                  : 'text-gray-500 hover:text-gray-700 hover:border-gray-300'
+              }`}
+              onClick={() => setActiveTab('report')}
+            >
+              Report
+            </button>
+          </nav>
+        </div>
+        
+        {activeTab === 'history' && (
+          <div className="p-6">
+            <div className="flex justify-between items-center mb-6">
+              <h2 className="text-2xl font-bold text-gray-800">Typing Session History</h2>
+              <div className="flex gap-3">
+                <button 
+                  className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 transition-colors"
+                  onClick={loadSessions}
+                >
+                  Refresh Data
+                </button>
+                <button 
+                  className="px-4 py-2 bg-red-500 text-white rounded hover:bg-red-600 transition-colors"
+                  onClick={clearAllSessions}
+                >
+                  Clear All Sessions
+                </button>
+              </div>
+            </div>
+            
+            <div className="stats-container">
+              <div className="stat-item">
+                <span className="stat-label">Total Sessions</span>
+                <span className="stat-value">{stats.totalSessions}</span>
+              </div>
+              <div className="stat-item">
+                <span className="stat-label">Average Score</span>
+                <span className="stat-value">{stats.avgScore}</span>
+              </div>
+              <div className="stat-item">
+                <span className="stat-label">Average Time (sec)</span>
+                <span className="stat-value">{stats.avgTime}</span>
+              </div>
+              <div className="stat-item">
+                <span className="stat-label">Average Accuracy</span>
+                <span className="stat-value">{stats.avgAccuracy}%</span>
+              </div>
+            </div>
+            
+            <div className="session-history">
+              {sortedSessions.length > 0 ? (
+                <table className="w-full border-collapse">
+                  <thead>
+                    <tr>
+                      <th className="bg-gray-50 text-left p-3 font-medium text-gray-600 border-b border-gray-200">Date</th>
+                      <th className="bg-gray-50 text-left p-3 font-medium text-gray-600 border-b border-gray-200">Time</th>
+                      <th className="bg-gray-50 text-left p-3 font-medium text-gray-600 border-b border-gray-200">Score</th>
+                      <th className="bg-gray-50 text-left p-3 font-medium text-gray-600 border-b border-gray-200">Duration</th>
+                      <th className="bg-gray-50 text-left p-3 font-medium text-gray-600 border-b border-gray-200">Keystrokes</th>
+                      <th className="bg-gray-50 text-left p-3 font-medium text-gray-600 border-b border-gray-200">Mistakes</th>
+                      <th className="bg-gray-50 text-left p-3 font-medium text-gray-600 border-b border-gray-200">Accuracy</th>
+                      <th className="bg-gray-50 text-left p-3 font-medium text-gray-600 border-b border-gray-200">Settings</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {sortedSessions.map((session, index) => (
+                      <tr key={index} className="hover:bg-gray-50">
+                        <td className="p-3 border-b border-gray-200">{new Date(session.startTime).toLocaleDateString()}</td>
+                        <td className="p-3 border-b border-gray-200">{new Date(session.startTime).toLocaleTimeString()}</td>
+                        <td className="p-3 border-b border-gray-200">{session.result?.score}</td>
+                        <td className="p-3 border-b border-gray-200">{session.result?.time.toFixed(1)}s</td>
+                        <td className="p-3 border-b border-gray-200">{session.result?.totalKeystrokes}</td>
+                        <td className="p-3 border-b border-gray-200">{session.result?.mistakes}</td>
+                        <td className="p-3 border-b border-gray-200">{calculateAccuracy(session)}</td>
+                        <td className="p-3 border-b border-gray-200">
+                          <div className="flex gap-1 flex-wrap">
+                            {session.settings.japanese && (
+                              <span className="inline-block px-2 py-1 text-xs font-medium rounded-full bg-green-100 text-green-800">Japanese</span>
+                            )}
+                            {session.settings.map && (
+                              <span className="inline-block px-2 py-1 text-xs font-medium rounded-full bg-green-100 text-green-800">Map</span>
+                            )}
+                            {session.settings.sound && (
+                              <span className="inline-block px-2 py-1 text-xs font-medium rounded-full bg-green-100 text-green-800">Sound</span>
+                            )}
+                            {session.settings.spell && (
+                              <span className="inline-block px-2 py-1 text-xs font-medium rounded-full bg-green-100 text-green-800">Spell</span>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              ) : (
+                <p className="p-4 text-center text-gray-500">No typing sessions recorded yet. Start typing on n-typing-english.com to record your progress!</p>
+              )}
+            </div>
           </div>
-        </div>
-      )}
-      
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
-        <div className="bg-white p-4 rounded shadow">
-          <div className="text-gray-500 text-sm">Total Sessions</div>
-          <div className="text-2xl font-bold text-blue-500">{stats.totalSessions}</div>
-        </div>
-        <div className="bg-white p-4 rounded shadow">
-          <div className="text-gray-500 text-sm">Average Score</div>
-          <div className="text-2xl font-bold text-blue-500">{stats.avgScore}</div>
-        </div>
-        <div className="bg-white p-4 rounded shadow">
-          <div className="text-gray-500 text-sm">Average Time (sec)</div>
-          <div className="text-2xl font-bold text-blue-500">{stats.avgTime}</div>
-        </div>
-        <div className="bg-white p-4 rounded shadow">
-          <div className="text-gray-500 text-sm">Average Accuracy</div>
-          <div className="text-2xl font-bold text-blue-500">{stats.avgAccuracy}%</div>
-        </div>
+        )}
+        
+        {activeTab === 'report' && (
+          <div className="p-6">
+            <div className="flex justify-between items-center mb-6">
+              <h2 className="text-2xl font-bold text-gray-800">Typing Activity Report</h2>
+              <div className="flex gap-3">
+                <button 
+                  id="generate-report"
+                  className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 transition-colors"
+                  onClick={generateReport}
+                  disabled={isGenerating || sessions.filter(s => s.result).length === 0}
+                >
+                  {isGenerating ? 'Generating...' : 'Generate Report'}
+                </button>
+                <button 
+                  id="save-report"
+                  className="px-4 py-2 bg-green-500 text-white rounded hover:bg-green-600 transition-colors"
+                  onClick={saveReportAsPNG}
+                  disabled={!reportData}
+                >
+                  Save as PNG
+                </button>
+              </div>
+            </div>
+            
+            <div className="mb-6">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Student Name:</label>
+                  <input
+                    type="text"
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    value={studentName}
+                    onChange={(e) => setStudentName(e.target.value)}
+                    placeholder="Enter student's name"
+                  />
+                </div>
+                
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Report Period:</label>
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      className={`px-3 py-2 text-sm rounded-md transition-colors ${
+                        reportPeriod === 'day'
+                          ? 'bg-blue-500 text-white'
+                          : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                      }`}
+                      onClick={() => setReportPeriod('day')}
+                    >
+                      Last 24 Hours
+                    </button>
+                    <button
+                      className={`px-3 py-2 text-sm rounded-md transition-colors ${
+                        reportPeriod === 'week'
+                          ? 'bg-blue-500 text-white'
+                          : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                      }`}
+                      onClick={() => setReportPeriod('week')}
+                    >
+                      Last 7 Days
+                    </button>
+                    <button
+                      className={`px-3 py-2 text-sm rounded-md transition-colors ${
+                        reportPeriod === 'month'
+                          ? 'bg-blue-500 text-white'
+                          : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                      }`}
+                      onClick={() => setReportPeriod('month')}
+                    >
+                      Last 30 Days
+                    </button>
+                    <button
+                      className={`px-3 py-2 text-sm rounded-md transition-colors ${
+                        reportPeriod === 'all'
+                          ? 'bg-blue-500 text-white'
+                          : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                      }`}
+                      onClick={() => setReportPeriod('all')}
+                    >
+                      All Time
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+            
+            <div className="bg-gray-50 rounded-lg border border-gray-200 overflow-hidden">
+              <div ref={reportContentRef} className="report-content">
+                {reportData ? (
+                  <div className="p-6 bg-white rounded-lg shadow">
+                    <div className="text-center mb-8">
+                      <h2 className="text-2xl font-bold text-gray-800">Typing Activity Report</h2>
+                      <p className="text-gray-600">
+                        {reportData.studentName} - {reportPeriod} - Generated on {reportData.date}
+                      </p>
+                    </div>
+                    
+                    <div className="mb-8">
+                      <h3 className="text-xl font-semibold mb-4 text-gray-700 border-b pb-2">Overall Statistics</h3>
+                      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                        <div className="bg-gray-50 p-4 rounded-lg">
+                          <div className="text-sm text-gray-500">Total Sessions</div>
+                          <div className="text-2xl font-bold">{reportData.stats.totalSessions || '—'}</div>
+                        </div>
+                        <div className="bg-gray-50 p-4 rounded-lg">
+                          <div className="text-sm text-gray-500">Average Score</div>
+                          <div className="text-2xl font-bold">{reportData.stats.avgScore || '—'}</div>
+                        </div>
+                        <div className="bg-gray-50 p-4 rounded-lg">
+                          <div className="text-sm text-gray-500">Average Time</div>
+                          <div className="text-2xl font-bold">{reportData.stats.avgTime || '—'}s</div>
+                        </div>
+                        <div className="bg-gray-50 p-4 rounded-lg">
+                          <div className="text-sm text-gray-500">Average Accuracy</div>
+                          <div className="text-2xl font-bold">{reportData.stats.avgAccuracy || '—'}%</div>
+                        </div>
+                      </div>
+                    </div>
+                    
+                    <div className="mb-8">
+                      <h3 className="text-xl font-semibold mb-4 text-gray-700 border-b pb-2">Activity by Section</h3>
+                      <div className="space-y-4">
+                        {reportData.sections.length > 0 ? (
+                          reportData.sections.map((section, index) => (
+                            <div key={index}>
+                              <div className="flex justify-between mb-1">
+                                <span className="font-medium">{section.name}</span>
+                                <span className="text-gray-600">{section.count} sessions, {section.totalTime.toFixed(1)}s total</span>
+                              </div>
+                              <div className="bg-gray-200 rounded-full h-6 overflow-hidden">
+                                <div 
+                                  className="bg-blue-500 h-full rounded-full transition-all duration-500 ease-out flex items-center pl-2 text-white text-sm font-medium"
+                                  style={{ width: `${(section.totalTime / Math.max(...reportData.sections.map(s => s.totalTime), 1)) * 100}%` }}
+                                >
+                                  {section.totalTime > 0 ? `${section.totalTime.toFixed(1)}s` : ''}
+                                </div>
+                              </div>
+                            </div>
+                          ))
+                        ) : (
+                          <div className="text-center text-gray-500 py-4">No section data available</div>
+                        )}
+                      </div>
+                    </div>
+                    
+                    <div className="mb-8">
+                      <h3 className="text-xl font-semibold mb-4 text-gray-700 border-b pb-2">Settings Used</h3>
+                      <div className="flex flex-wrap gap-3">
+                        <div className={`px-3 py-2 rounded-full ${reportData.sections.reduce((sum, s) => sum + s.settings.japanese, 0) > 0 ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-600'}`}>
+                          Japanese: {reportData.sections.reduce((sum, s) => sum + s.settings.japanese, 0)} sessions
+                        </div>
+                        <div className={`px-3 py-2 rounded-full ${reportData.sections.reduce((sum, s) => sum + s.settings.map, 0) > 0 ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-600'}`}>
+                          Map: {reportData.sections.reduce((sum, s) => sum + s.settings.map, 0)} sessions
+                        </div>
+                        <div className={`px-3 py-2 rounded-full ${reportData.sections.reduce((sum, s) => sum + s.settings.sound, 0) > 0 ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-600'}`}>
+                          Sound: {reportData.sections.reduce((sum, s) => sum + s.settings.sound, 0)} sessions
+                        </div>
+                        <div className={`px-3 py-2 rounded-full ${reportData.sections.reduce((sum, s) => sum + s.settings.spell, 0) > 0 ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-600'}`}>
+                          Spell: {reportData.sections.reduce((sum, s) => sum + s.settings.spell, 0)} sessions
+                        </div>
+                      </div>
+                    </div>
+                    
+                    <div className="text-center text-xs text-gray-400 mt-6">
+                      <p>Report generated by Typing Extension • Security Token: {reportData.securityToken.substring(0, 8)}</p>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="p-6 bg-white rounded-lg shadow">
+                    <div className="text-center mb-8">
+                      <h2 className="text-2xl font-bold text-gray-800">Typing Activity Report</h2>
+                      <p className="text-gray-600">
+                        {studentName} - {reportPeriod} - Preview
+                      </p>
+                    </div>
+                    
+                    <div className="mb-8">
+                      <h3 className="text-xl font-semibold mb-4 text-gray-700 border-b pb-2">Overall Statistics</h3>
+                      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                        <div className="bg-gray-50 p-4 rounded-lg">
+                          <div className="text-sm text-gray-500">Total Sessions</div>
+                          <div className="text-2xl font-bold">—</div>
+                        </div>
+                        <div className="bg-gray-50 p-4 rounded-lg">
+                          <div className="text-sm text-gray-500">Average Score</div>
+                          <div className="text-2xl font-bold">—</div>
+                        </div>
+                        <div className="bg-gray-50 p-4 rounded-lg">
+                          <div className="text-sm text-gray-500">Average Time</div>
+                          <div className="text-2xl font-bold">—</div>
+                        </div>
+                        <div className="bg-gray-50 p-4 rounded-lg">
+                          <div className="text-sm text-gray-500">Average Accuracy</div>
+                          <div className="text-2xl font-bold">—</div>
+                        </div>
+                      </div>
+                    </div>
+                    
+                    <div className="mb-8">
+                      <h3 className="text-xl font-semibold mb-4 text-gray-700 border-b pb-2">Activity by Section</h3>
+                      <div className="space-y-4">
+                        {[1, 2, 3].map((index) => (
+                          <div key={index}>
+                            <div className="flex justify-between mb-1">
+                              <span className="font-medium">Section {index}</span>
+                              <span className="text-gray-600">0 sessions, 0s total</span>
+                            </div>
+                            <div className="bg-gray-200 rounded-full h-6 overflow-hidden">
+                              <div 
+                                className="bg-gray-300 h-full rounded-full transition-all duration-500 ease-out flex items-center pl-2 text-white text-sm font-medium"
+                                style={{ width: `${index * 10}%` }}
+                              >
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                    
+                    <div className="mb-8">
+                      <h3 className="text-xl font-semibold mb-4 text-gray-700 border-b pb-2">Settings Used</h3>
+                      <div className="flex flex-wrap gap-3">
+                        <div className="px-3 py-2 rounded-full bg-gray-100 text-gray-600">
+                          Japanese: 0 sessions
+                        </div>
+                        <div className="px-3 py-2 rounded-full bg-gray-100 text-gray-600">
+                          Map: 0 sessions
+                        </div>
+                        <div className="px-3 py-2 rounded-full bg-gray-100 text-gray-600">
+                          Sound: 0 sessions
+                        </div>
+                        <div className="px-3 py-2 rounded-full bg-gray-100 text-gray-600">
+                          Spell: 0 sessions
+                        </div>
+                      </div>
+                    </div>
+                    
+                    <div className="text-center text-xs text-gray-400 mt-6">
+                      <p>Click "Generate Report" to create a real report with your data</p>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+            
+            {statusMessage && (
+              <div className={`mt-4 p-3 rounded-md ${
+                statusMessage.type === 'success' 
+                  ? 'bg-green-50 text-green-800 border border-green-200' 
+                  : 'bg-red-50 text-red-800 border border-red-200'
+              }`}>
+                {statusMessage.text}
+              </div>
+            )}
+            
+            <div id="report-status" className="status-message"></div>
+          </div>
+        )}
       </div>
-      
-      {sortedSessions.length > 0 ? (
-        <div className="bg-white rounded shadow overflow-x-auto">
-          <table className="min-w-full">
-            <thead>
-              <tr className="bg-gray-100">
-                <th className="px-4 py-2 text-left">Date</th>
-                <th className="px-4 py-2 text-left">Time</th>
-                <th className="px-4 py-2 text-left">Score</th>
-                <th className="px-4 py-2 text-left">Duration</th>
-                <th className="px-4 py-2 text-left">Keystrokes</th>
-                <th className="px-4 py-2 text-left">Mistakes</th>
-                <th className="px-4 py-2 text-left">Accuracy</th>
-                <th className="px-4 py-2 text-left">Settings</th>
-              </tr>
-            </thead>
-            <tbody>
-              {sortedSessions.map((session) => {
-                const date = new Date(session.startTime);
-                return (
-                  <tr key={session.id} className="border-t hover:bg-gray-50">
-                    <td className="px-4 py-2 whitespace-nowrap">{date.toLocaleDateString()}</td>
-                    <td className="px-4 py-2">{date.toLocaleTimeString()}</td>
-                    <td className="px-4 py-2">{session.result?.score}</td>
-                    <td className="px-4 py-2">{session.result?.time.toFixed(1)}s</td>
-                    <td className="px-4 py-2">{session.result?.totalKeystrokes}</td>
-                    <td className="px-4 py-2">{session.result?.mistakes}</td>
-                    <td className="px-4 py-2">{calculateAccuracy(session)}</td>
-                    <td className="px-4 py-2">{getSettingsBadges(session.settings)}</td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      ) : (
-        <div className="text-center py-10 bg-white rounded shadow">
-          <p className="text-gray-500">
-            No typing sessions recorded yet. Start typing on n-typing-english.com to record your progress!
-          </p>
-        </div>
-      )}
     </div>
   );
 }

@@ -26,6 +26,8 @@ interface TypingSession {
   result?: TypingSessionResult;
   url: string;
   title: string;
+  section?: string;
+  count?: number;
 }
 
 // Global session tracking
@@ -286,6 +288,14 @@ function startTypingSession(): void {
   const japaneseEnabled = japaneseToggle?.checked ?? true;
   const mapEnabled = mapToggle?.checked ?? true;
   
+  // Get section name from breadcrumb
+  let sectionName = '';
+  const breadcrumbItem = document.querySelector('.breadcrumb-item.active');
+  if (breadcrumbItem && breadcrumbItem.textContent) {
+    sectionName = breadcrumbItem.textContent.trim();
+    console.log('Section name detected:', sectionName);
+  }
+  
   // Create a new session
   currentSession = {
     id: generateSessionId(),
@@ -297,7 +307,8 @@ function startTypingSession(): void {
       map: mapEnabled
     },
     url: window.location.href,
-    title: document.title
+    title: document.title,
+    section: sectionName
   };
   
   console.log('Typing session started:', currentSession);
@@ -401,8 +412,44 @@ function handleResultSave(): void {
     mistakes
   };
   
-  // Save to localStorage
-  saveSessionToStorage(currentSession);
+  // Update session count for this section
+  if (currentSession.section) {
+    // Get existing section counts from storage
+    chrome.storage.local.get({ sectionCounts: {} }, (data) => {
+      try {
+        const sectionCounts = data.sectionCounts || {};
+        const sectionName = currentSession?.section || '';
+        
+        if (sectionName) {
+          // Increment count for this section
+          sectionCounts[sectionName] = (sectionCounts[sectionName] || 0) + 1;
+          currentSession!.count = sectionCounts[sectionName];
+          
+          // Save updated counts
+          chrome.storage.local.set({ sectionCounts }, () => {
+            if (chrome.runtime.lastError) {
+              console.error('Error saving section counts:', chrome.runtime.lastError);
+            } else {
+              console.log('Updated section counts:', sectionCounts);
+            }
+            
+            // Save session to storage
+            saveSessionToStorage(currentSession!);
+          });
+        } else {
+          // No section name, just save the session
+          saveSessionToStorage(currentSession!);
+        }
+      } catch (error) {
+        console.error('Error processing section counts:', error);
+        // Still save the session even if counting fails
+        saveSessionToStorage(currentSession!);
+      }
+    });
+  } else {
+    // No section info, just save the session
+    saveSessionToStorage(currentSession);
+  }
   
   console.log('Typing session completed and saved:', currentSession);
   
